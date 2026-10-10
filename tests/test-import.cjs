@@ -1,0 +1,11 @@
+const assert=require('node:assert/strict');const fs=require('node:fs'),vm=require('node:vm'),context={module:{exports:{}}};vm.runInNewContext(fs.readFileSync(require.resolve('../public/app.js'),'utf8'),context);const {parseCSV,validateCSV,csvCell}=context.module.exports;
+assert.deepEqual(JSON.parse(JSON.stringify(parseCSV('a,b\r\n"hello, world","line 1\nline 2"\r\n'))),[['a','b'],['hello, world','line 1\nline 2']]);
+assert.deepEqual(JSON.parse(JSON.stringify(parseCSV('a,b\n"a""b",2'))),[['a','b'],['a"b','2']]);assert.throws(()=>parseCSV('a\n"broken'),/not closed/);
+const good='year,value,region,lat,lon\n'+Array.from({length:10},(_,i)=>`${2000+i},${i},"Test, region",23.8,90.4`).join('\n');const rows=validateCSV(good);assert.equal(rows[0].values.length,10);assert.equal(rows[0].name,'Test, region');
+assert.throws(()=>validateCSV(good+'\n2000,3,"Test, region",23.8,90.4'),/duplicate/);
+assert.throws(()=>validateCSV(good.replace('2000,0','2000,-999')),/fill value/);
+assert.throws(()=>validateCSV(good.replace('23.8','123.8')),/coordinates/);
+assert.throws(()=>validateCSV(good.replace('2000,0','2000,foo')),/invalid or fill/);
+assert.throws(()=>validateCSV(good.replace('2000,0','2000,0').replace('23.8','24.0')),/changing coordinates/);
+assert.throws(()=>validateCSV('year,value,region,lat,lon\n2001,1,A,0,0'),/eight/);
+assert.equal(csvCell('=SUM(A1:A2)'),"\"'=SUM(A1:A2)\"");assert.equal(csvCell(-2),'"-2"');console.log('PASS: CSV quoting, multiline fields, imports, duplicates, fill values, coordinates, minimum sample size, and formula-injection protection.');

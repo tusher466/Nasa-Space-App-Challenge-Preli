@@ -1,0 +1,33 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import {parsePower,parseGiss,powerEndpoint,gistempEndpoint,VARIABLES} from '../server/nasa.mjs';
+const fixture=JSON.parse(fs.readFileSync(new URL('../public/assets/power-dhaka.json',import.meta.url),'utf8'));
+const csv=fs.readFileSync(new URL('../public/assets/gistemp-zonal.csv',import.meta.url),'utf8');
+const expected=JSON.parse(fs.readFileSync(new URL('../public/assets/data.json',import.meta.url),'utf8')).points.find(p=>p.id==='dhaka');
+assert.deepEqual(parsePower(fixture,23.8,90.4,2025).series,expected.series);
+const incomplete=structuredClone(fixture);incomplete.properties.parameter.T2M['202512']=-999;
+assert.equal(parsePower(incomplete,23.8,90.4,2025).latestCompleteYear,2024);
+assert.equal(parsePower(incomplete,23.8,90.4,2025).series.T2M.at(-1)[0],2024);
+assert.equal(parsePower(fixture,23.8,90.4,2024).series.T2M.at(-1)[0],2024);
+const badUnit=structuredClone(fixture);badUnit.parameters.T2M.units='K';assert.throws(()=>parsePower(badUnit,23.8,90.4),/units changed/);
+const badFill=structuredClone(fixture);for(const key of VARIABLES)for(const y of Object.keys(badFill.properties.parameter[key]))badFill.properties.parameter[key][y]=-999;assert.throws(()=>parsePower(badFill,23.8,90.4),/too few/);
+const giss=parseGiss(csv);assert.equal(giss.latestCompleteYear,2025);assert.equal(giss.firstYear,1880);assert.equal(giss.baseline,'1951–1980');
+const header=csv.split('\n')[0],row=csv.trim().split('\n').at(-1).split(',');row[0]=String(new Date().getUTCFullYear());assert.equal(parseGiss(csv+'\n'+row.join(',')).latestCompleteYear,2025);
+assert.throws(()=>parseGiss(csv+csv.trim().split('\n').at(-1)+'\n'),/unique and ordered/);
+assert.throws(()=>parseGiss('Year,T2M\n2001,1'),/format changed/);
+let calls=0,lastURL;const cacheMap=new Map(),cache={match:async key=>cacheMap.get(key.url)?.clone(),put:async(key,value)=>cacheMap.set(key.url,value.clone())};
+const fetcher=async (url,options)=>{assert.equal(options.redirect,'manual');calls++;lastURL=url;return new Response(JSON.stringify(fixture));};
+const options={fetcher,cache};const req=new Request('https://earthlens.example/api/nasa/power?lat=23.801&lon=90.399');
+const first=await powerEndpoint(req,options);assert.equal(first.status,200);const one=await first.json();assert.equal(one.lat,23.8);assert.equal(one.lon,90.4);assert.equal(one.source,'NASA POWER / MERRA-2');assert.equal(one.delivery,'upstream');assert.equal(new URL(lastURL).hostname,'power.larc.nasa.gov');assert.equal(new URL(lastURL).searchParams.get('end'),String(new Date().getUTCFullYear()-1));
+const two=await(await powerEndpoint(req,options)).json();assert.equal(two.delivery,'edge-cache');assert.equal(two.retrieved,one.retrieved);assert.equal(calls,1);
+const refresh=await(await powerEndpoint(new Request(req.url+'&refresh=1'),options)).json();assert.equal(refresh.delivery,'upstream');assert.equal(calls,2);
+for(const query of ['lat=91&lon=0','lat=0&lon=181','lat=x&lon=0','lat=&lon=0','lon=0'])assert.equal((await powerEndpoint(new Request('https://earthlens.example/api/nasa/power?'+query),options)).status,400);
+assert.equal(calls,2);
+const fail=await powerEndpoint(req,{fetcher:async()=>new Response('unavailable',{status:503}),cache:null});assert.equal(fail.status,502);assert.match((await fail.json()).error,/503/);
+assert.equal((await powerEndpoint(req,{fetcher:async()=>new Response(JSON.stringify(badUnit)),cache:null})).status,502);const redirect=await powerEndpoint(req,{fetcher:async()=>new Response(null,{status:302,headers:{Location:'https://example.com'}}),cache:null});assert.equal(redirect.status,502);assert.match((await redirect.json()).error,/302/);
+const gs=await gistempEndpoint(new Request('https://earthlens.example/api/nasa/gistemp'),{fetcher:async url=>{assert.equal(new URL(url).hostname,'data.giss.nasa.gov');return new Response(csv);},cache:null});assert.equal(gs.status,200);assert.equal((await gs.json()).latestCompleteYear,2025);
+console.log('PASS: NASA fixtures, complete years, units, fill values, GISS validation, fixed upstreams, coordinate validation, cache dates, refresh bypass and upstream errors.');
+
+let gissAttempts=[];const canonicalFallback=await gistempEndpoint(new Request('https://earthlens.example/api/nasa/gistemp?refresh=1'),{cache:null,fetcher:async(url,options)=>{assert.match(options.headers.Accept,/text\/csv/);assert.match(options.headers['User-Agent'],/EarthLens/);gissAttempts.push(url);return url.includes('%2B')?new Response(csv):new Response('Forbidden',{status:403});}});assert.equal(canonicalFallback.status,200);assert.equal(gissAttempts.length,2);assert.equal((await canonicalFallback.json()).url,gissAttempts[1]);console.log('PASS: GISS request headers and equivalent official encoded-path fallback.');
+
+const forbiddenCache={match:async()=>{throw Error('This Worker is not permitted to access the default cache.');},put:async()=>{throw Error('Forbidden');}};let fallbackCalls=0;const fallbackOptions={cache:forbiddenCache,fetcher:async()=>{fallbackCalls++;return new Response(JSON.stringify(fixture));}};const forcedMemory=await(await powerEndpoint(new Request(req.url+'&refresh=1'),fallbackOptions)).json();assert.equal(forcedMemory.delivery,'upstream');const cachedMemory=await(await powerEndpoint(req,fallbackOptions)).json();assert.equal(cachedMemory.delivery,'isolate-cache');assert.equal(cachedMemory.retrieved,forcedMemory.retrieved);assert.equal(fallbackCalls,1);assert.equal((await powerEndpoint(new Request(req.url+'&refresh=1'),fallbackOptions)).status,200);assert.equal(fallbackCalls,2);console.log('PASS: restricted-host cache failures recover through bounded isolate cache; forced refresh still contacts NASA.');
